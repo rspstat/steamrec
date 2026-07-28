@@ -1,0 +1,106 @@
+body {
+  margin: 0;
+  font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+  background: #1b2838;
+  color: #c7d5e0;
+}
+
+.home {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.section-row {
+  margin-bottom: 32px;
+}
+
+.section-row h2 {
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+
+.game-row {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.game-card {
+  flex: 0 0 180px;
+  background: #2a3f5a;
+  border-radius: 4px;
+  padding: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.game-card:hover {
+  background: #3a5a7a;
+}
+
+.game-card-name {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-card-genre {
+  font-size: 12px;
+  color: #8f98a0;
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-card-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.game-card-review {
+  color: #66c0f4;
+}
+
+.game-card-price {
+  color: #a4d007;
+}
+
+.home-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.auth-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.auth-bar.login-button {
+  background: #66c0f4;
+  color: #1b2838;
+  padding: 8px 16px;
+  border-radius: 4px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.auth-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 2px;
+}
+
+.auth-owned-count {
+  color: #8f98a0;
+}

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# AI artifacts (학습된 모델 가중치, 임베딩 인덱스 등)
+ai/artifacts/*
+!ai/artifacts/.gitkeep
+ai/data/raw/*
+!ai/data/raw/.gitkeep
+ai/data/processed/*
+!ai/data/processed/.gitkeep
+ai/data/*.db
+
+# backend 자체 운영 데이터 (유저/세션/보유 게임 — 개인정보 포함, 커밋 금지)
+backend/data/
+
+# Node / frontend
+node_modules/
+frontend/build/
+frontend/dist/
+
+# Env
+.env
+.env.local
+
+# OS / IDE
+.DS_Store
+.vscode/
+*.log
