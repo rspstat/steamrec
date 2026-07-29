@@ -28,6 +28,17 @@ CREATE TABLE IF NOT EXISTS games (
     last_updated_at TEXT,
     is_active INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS reviews (
+    recommendationid TEXT PRIMARY KEY,
+    appid INTEGER NOT NULL,
+    review TEXT,
+    voted_up INTEGER,
+    votes_up INTEGER,
+    playtime_forever INTEGER,
+    language TEXT,
+    collected_at TEXT
+);
 """
 
 # 기존에 만들어둔 games.db에는 없을 수 있는 컬럼들 (Job 3, 섹션 큐레이션에서 추가됨).
@@ -43,7 +54,7 @@ _MIGRATION_COLUMNS = {
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(SCHEMA)
+    conn.executescript(SCHEMA)
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
     for col, col_type in _MIGRATION_COLUMNS.items():
         if col not in existing_cols:
@@ -212,4 +223,28 @@ def upsert_new_appid(
             last_updated_at=excluded.last_updated_at
         """,
         (appid, name, last_modified, now, now),
+    )
+
+
+def insert_reviews(conn: sqlite3.Connection, appid: int, reviews: list[dict], now: str) -> None:
+    """Steam appreviews 응답을 reviews 테이블에 저장 (이미 있는 리뷰는 스킵)."""
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO reviews
+            (recommendationid, appid, review, voted_up, votes_up, playtime_forever, language, collected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                r["recommendationid"],
+                appid,
+                r.get("review", ""),
+                1 if r.get("voted_up") else 0,
+                r.get("votes_up", 0),
+                r.get("author", {}).get("playtime_forever", 0),
+                r.get("language"),
+                now,
+            )
+            for r in reviews
+        ],
     )
