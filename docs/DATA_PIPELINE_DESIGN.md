@@ -1,190 +1,111 @@
-# 전체 카탈로그 수집 + 일일 자동 업데이트 설계
+# 데이터 파이프라인
 
-## 배경
+`ai/collect/`, `ai/features/`가 어떻게 게임 데이터를 모으고 채우는지 정리한
+문서. 실행 방법·스케줄은 [ARCHITECTURE.md](ARCHITECTURE.md)를, 전체 시스템
+구조는 그 문서를 먼저 보는 게 낫다 — 여기는 데이터 수집 로직 자체에 집중.
 
-기존 `ai/collect/fetch_games.py`는 SteamSpy `top100in2weeks`로 인기 게임 100개만 가져온다.
-웹사이트로 서비스할 것을 고려하면 (1) Steam 전체 게임을 커버하고 (2) 신작이 나올 때마다
-자동으로 반영되어야 한다. 이 문서는 그 확장 설계를 정리한다.
+## 왜 이런 모양이 됐는지 (핵심 결정 3가지)
 
-## 사전 검증 결과 (중요)
+1. **Steam 전체 카탈로그(15만+)를 무작위로 훑지 않는다.** 처음엔 SteamSpy
+   벌크 백필(8만 2천개) + 공식 `IStoreService/GetAppList` 신규 탐지(10만개
+   추가)로 "전체"를 모으려 했는데, appid 순서로 장르/타입을 채우면 하루~
+   3.5일씩 걸렸다. 그래서 대신 **Steam 스토어 검색 API**로 웹사이트가 실제
+   보여줄 섹션(신규 인기 급상승/최신 출시/인디/멀티플레이) 기준으로 필요한
+   게임만 직접 큐레이션하는 쪽으로 방향을 바꿨다. appid 순회로 얻은
+   원본(`games` 테이블의 `sections IS NULL`인 행들)은 지우지 않고 남겨뒀다
+   — 나중에 리뷰 수 기준 상위권을 추가로 편입할 때(카탈로그 확장) 재사용함.
 
-설계 전에 실제 API를 호출해서 확인한 사실:
+2. **Store appdetails 호출 시 `cc=us`를 항상 고정한다.** 지역을 안 주면
+   서버 IP 위치 기준으로 통화가 바뀌어서(KRW 등) 가격이 오염된다 — 실제로
+   484개 게임 가격이 통화 단위 차이로 100배 이상 부풀어 있던 걸 나중에
+   발견해서 복구한 적 있음.
 
-| 엔드포인트 | 결과 |
-|---|---|
-| `ISteamApps/GetAppList/v2` (공식, 키 불필요로 알려짐) | **404 — 더 이상 존재하지 않음** (`Method 'GetAppList' not found in interface 'ISteamApps'`) |
-| `IStoreService/GetAppList/v1` (공식, 전체 앱 목록의 후속 엔드포인트) | **403 — API 키 필요** (`Access is denied... verify your key= parameter`) |
-| SteamSpy `request=all&page=N` | **정상 동작, 키 불필요**, 페이지당 1000개 (page=0,1,2… 순회) |
-| SteamSpy `request=appdetails&appid=X` | 정상 동작, `genre`/`tags` 포함 |
+3. **모든 수집 스크립트는 resumable하게 짠다.** appid/리뷰/이미지 단위로
+   "이미 있으면 스킵"하도록 만들어서, 중단 후 재실행하거나 매일 스케줄러가
+   다시 돌려도 새로 생긴 것만 처리한다.
 
-즉 **"Steam 전체 앱 목록"을 공식 API로 얻으려면 이제 STEAM_API_KEY가 필수**다.
-액션 아이템 1번(API 키 발급)을 이 작업 전에 먼저 해야 한다. 키 없이 진행하려면
-SteamSpy의 `all` 벌크 목록으로 대체할 수 있지만, SteamSpy는 실제 플레이어 데이터가
-쌓여야 반영되는 3rd-party 미러라 발매 당일 신작은 며칠 늦게 잡힐 수 있다.
+## 데이터 소스
 
-## 데이터 소스 정리
-
-| 소스 | 인증 | 용도 | 제한 |
-|---|---|---|---|
-| SteamSpy `all` (페이지네이션) | 불필요 | 전체 게임 벌크 메타데이터(장르/태그/오너수/가격/리뷰) 초기 백필 및 주기 갱신 | ~1 req/sec 권장 |
-| `IStoreService/GetAppList/v1` | STEAM_API_KEY | 매일 "오늘 새로 생긴 appid" 탐지용 마스터 목록 (Valve 자체 목록이라 신작 반영이 가장 빠름) | 키만 있으면 대용량 호출 가능 |
-| Store `appdetails` (store.steampowered.com/api/appdetails) | 불필요 | 신규 appid의 `type`(game/dlc/demo 판별), 출시일, 스크린샷, 짧은 설명 보강 | 커뮤니티 보고 기준 약 200 req/5min — 신규분만 조회하면 충분 |
-| `IPlayerService/GetOwnedGames` | STEAM_API_KEY + steamid | (나중 단계) CF용 유저-게임 상호작용 데이터 | 유저별 호출, 별도 트랙 |
-
-## 저장 스키마 (PostgreSQL, `games` 테이블)
-
-| 컬럼 | 타입 | 설명 |
+| 소스 | 인증 | 용도 |
 |---|---|---|
-| `appid` | int, PK | Steam appid |
-| `name` | text | 게임명 |
-| `type` | text | game/dlc/demo — Store appdetails 기반, non-game 필터링용 |
-| `genre` | text | SteamSpy genre (콤마 구분) |
-| `tags` | jsonb | SteamSpy tags (태그명→투표수) |
-| `price` | int | 현재가 (cent 단위) |
-| `positive` / `negative` | int | 리뷰 수 |
-| `owners_estimate` | text | SteamSpy owners 범위 |
-| `release_date` | date | Store appdetails 기반 |
-| `first_seen_at` | timestamp | DB에 처음 들어온 시각 (신작 감지 시점) |
-| `last_updated_at` | timestamp | 마지막 메타데이터 갱신 시각 |
-| `is_active` | bool | 목록에서 사라진(삭제/비공개) 게임 표시 |
+| `store.steampowered.com/search/results/` | 불필요 | 섹션별 게임 후보 발견 (appid/이름/출시일/가격/리뷰비율) |
+| SteamSpy `appdetails` | 불필요 | genre/tags(커뮤니티 투표 태그)/owners/price 보강. 1req/sec 권장 |
+| `store.steampowered.com/api/appdetails` | 불필요 (단, `cc=us` 고정) | type(게임/DLC 구분), release_date, genre 폴백 |
+| `store.steampowered.com/appreviews/{appid}` | 불필요 | 리뷰 본문 (NLP용) |
+| Steam CDN 헤더 이미지 | 불필요 | CV 임베딩용 이미지. 예측 URL 실패 시 Store appdetails로 폴백 |
+| `IStoreService/GetAppList/v1` | STEAM_API_KEY | Steam 공식 전체 appid 목록 (역사적으로 카탈로그 확장 후보 발견에 사용) |
+| `IPlayerService/GetOwnedGames` | STEAM_API_KEY + steamid | 로그인 유저의 보유 게임 (CF용, `backend/app/api/auth.py`에서 호출) |
 
-`appid` 기준 upsert. `type != 'game'`인 행은 CF/추천 대상에서 제외하되, 원본은 남겨서
-나중에 DLC 연관 추천 등에 재활용 가능하게 한다.
+## 현재 파이프라인 (`ai/scheduler.py`가 매일 재실행)
 
-## 파이프라인 구성
+```
+discover_sections.py  → enrich_selected.py → enrich_genre_fallback.py
+        │                                              │
+        └──────────────────┬───────────────────────────┘
+                            ▼
+              fetch_reviews.py, cv_embed.py (features/)
+                            ▼
+              nlp_embed.py (features/)
+                            ▼
+              hybrid.py, collaborative.py (models/)
+```
 
-### Job 1 — 초기 백필 (1회성) · 구현/실행 완료
+1. **`discover_sections.py`** — 스토어 검색 API로 4개 섹션(`trending`,
+   `new_release`, `indie`, `multiplayer`)의 후보를 받아 `games.sections`에
+   기록. 이미 알던 게임은 섹션만 병합, 새 게임은 appid/이름/출시일/리뷰
+   비율로 새 행 생성. `category1=998`(게임) 필터가 걸려 있어 DLC/사운드
+   트랙은 애초에 안 섞인다.
+2. **`enrich_selected.py`** — `sections`는 있는데 `genre`가 없는 행에
+   SteamSpy `appdetails`로 genre/tags/price/owners 보강.
+3. **`enrich_genre_fallback.py`** — SteamSpy가 아직 못 따라잡은 갓 나온
+   게임(플레이 데이터가 없어 SteamSpy 응답이 비어있음)은 Store
+   appdetails로 대체 보강.
+4. **`fetch_reviews.py`** — 게임당 리뷰 최대 20개 (Steam이 "도움순"으로
+   골라줌, `filter=all&review_type=all`이라 긍정/부정이 알아서 섞여 들어옴).
+5. **`cv_embed.py`** (`ai/features/`) — 헤더 이미지를 CLIP으로 임베딩.
+6. **`nlp_embed.py`** (`ai/features/`) — 리뷰 텍스트를 다국어 Sentence-BERT로
+   임베딩, 게임 단위로 평균.
+7. **`hybrid.py`**, **`collaborative.py`** (`ai/models/`) — 콘텐츠
+   유사도/CF 재계산. 자세한 내용은 ARCHITECTURE.md의 "추천 모델" 참고.
 
-`ai/collect/backfill_steamspy.py`. 실제 실행 결과:
-- SteamSpy `all`은 page=0부터 순회하다 마지막 페이지(1000개 미만, 테스트 시점 기준
-  86페이지)에서 자연 종료 — 그 이후 페이지는 빈 응답이 아니라 500/"Too many
-  connections" 에러로 실패하므로, 종료 조건은 "빈 응답"이 아니라 "요청 실패
-  또는 1000개 미만 페이지"로 구현했다.
-- 총 **82,523개** appid를 `ai/data/games.db`(SQLite)에 upsert 완료.
-- **중요 정정**: `all` 벌크 응답에는 `genre`/`tags`가 없다 — `price`, `owners`,
-  `positive`/`negative`, `ccu`만 들어있다. `genre`/`tags`는 개별
-  `appdetails` 호출(1req/sec)에만 존재한다. 82,523개를 전부 개별 조회하면
-  약 23시간이 걸리므로, 전체 게임의 장르/태그 보강은 Job 1의 범위 밖으로
-  분리하고 별도 결정이 필요하다 (아래 "남은 전제 조건" 참고).
-- 이후 신규 appid에 한해서만 Store `appdetails`로 `type`/`release_date`/스크린샷 보강 (Job 3, 미구현)
+## 카탈로그 확장 (`expand_catalog.py`, 1회 실행 완료)
 
-### Job 2 — 일일 신규 게임 탐지 (Celery beat, 매일 1회) · 구현/실행 완료
+섹션 큐레이션(4,463개) 이후 커버리지를 넓히려고, appid 순회로 모아뒀던
+원본 데이터(SteamSpy 벌크 8만 2천개) 중 **리뷰 수(positive+negative) 상위
+10,000개**만 골라 type 분류 + genre 보강을 해서 `sections='catalog'`로
+편입했다. 전체 17만+ 백로그를 다 처리하면 3~4일 걸리는데(Store API
+1req/sec 제약), 리뷰 상위로 자르면 실제 서비스 가치가 높은 게임(Skyrim,
+Portal 2, Witcher 3급)부터 확보되면서 몇 시간 내로 끝난다. 결과: 6,024개
+추가로 게임(type='game')임을 확인, 나머지는 DLC/demo/unknown으로 제외.
 
-`ai/collect/detect_new_games.py`. 실제 실행 결과:
-- `IStoreService/GetAppList/v1`(50,000개씩 페이지네이션, `last_appid`로 이어받기)로
-  전체 **176,250개** appid+name 확보.
-- Job 1로 확보한 82,523개와 diff한 결과 **100,061개가 신규**로 잡혔다.
-- **중요 발견**: SteamSpy `all` 벌크는 appid 정렬이 아니라 자체 순위/방식으로
-  상위 ~86.5k개만 노출하는 것으로 보인다 — 심지어 **Dota 2(appid 570)조차
-  SteamSpy 벌크 목록에 없었다**. 즉 SteamSpy `all`은 "전체 카탈로그"가 아니라
-  "SteamSpy가 추적하는 서브셋"이라 이 Job 2(공식 Valve 목록)가 진짜 마스터
-  목록 역할을 해야 하는 게 맞다는 걸 실측으로 확인한 셈.
-- 다만 Job 2가 새로 등록한 10만 개는 appid/name만 있고 owners/price/genre가
-  없다 (`enrich_appdetails.py`의 활성 필터가 `owners_estimate IS NOT NULL`을
-  요구하므로 자동으로 보강 대상에서 제외됨). 그 결과 Dota 2처럼 SteamSpy
-  벌크에는 없지만 실제로는 매우 활성인 게임이 현재 보강 파이프라인에서
-  누락된다 — Job 3(타입 필터링 + 상세 보강)에서 반드시 다뤄야 할 문제.
-- 10만 개 중 다수는 DLC/데모/사운드트랙/툴일 것으로 예상되나 아직 `type` 필터링
-  전이라 구분되지 않은 상태 (Job 3 범위).
+10만+ 전체로 더 넓히고 싶으면 이 스크립트를 다시 돌리되(TARGET_COUNT를
+올리고), Store API 호출량이 선형으로 늘어난다는 점을 감안할 것.
 
-### Job 3 — 신규 게임 상세 보강 (큐 워커, rate-limit 적용) · 구현/1차 검증 완료
+## 운영 중 실제로 겪은 문제들 (재발 방지 메모)
 
-`ai/collect/classify_new_games.py`. `games` 테이블에 `type`/`release_date` 컬럼을
-추가(`db.py` 마이그레이션)하고, 대상은 `type IS NULL AND owners_estimate IS NULL`
-(Job 2가 발견했지만 아직 아무것도 모르는 행)로 한정.
+- **SteamSpy `all` 벌크에는 genre/tags가 없다** — `price`/`owners`/리뷰
+  수만 있음. genre/tags는 개별 `appdetails` 호출로만 얻을 수 있다.
+- **SteamSpy `all`은 전체 카탈로그가 아니라 자체 상위 서브셋(~8만 6천개)만
+  노출한다** — appid 정렬도 아니고, Dota 2처럼 초대형 게임도 빠져 있었다.
+  공식 목록(`IStoreService/GetAppList`)이 진짜 마스터 목록.
+- **Steam 헤더 이미지 CDN 경로가 두 가지다** — 오래된 게임은
+  `cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg`로 바로
+  받아지지만, 최근 게임(대략 appid 380만 이상)은 해시가 포함된 새 경로라
+  예측 불가능 — Store appdetails의 `header_image` 필드로 폴백해야 한다.
+  (`cv_embed.py`에 이미 반영됨)
+- **SteamSpy/Store 둘 다 가끔 빈 응답이나 502/504를 준다** — 모든 수집
+  스크립트에 재시도(최대 3회, 지수 백오프 아님, 고정 backoff)가 들어있다.
+  없으면 몇 시간짜리 백그라운드 작업이 예외 하나로 통째로 죽는다.
+- **DB에 인덱스 없이 `NOT EXISTS` 서브쿼리를 쓰면 테이블이 커질수록
+  느려진다** — `reviews(appid)`, `games(sections)`에 인덱스를 걸어뒀다
+  (`ai/collect/db.py`).
 
-처리 순서: Store `appdetails`로 `type` 확인 → `game`이 아니면 `is_active=0`
-표시 후 SteamSpy 호출 생략 (호출 절약) → `game`이면 SteamSpy `appdetails`로
-genre/tags/price/owners까지 보강.
+## 알려진 한계
 
-30개 샘플 실행 결과: game 26 / unknown(비공개·삭제 등으로 조회 실패) 4,
-DLC/demo/music은 이번 샘플(appid 오름차순 = Steam 초기 카탈로그)에는 없었음 —
-낮은 appid 구간은 DLC/사운드트랙 관행이 자리잡기 전이라 최근 발매작 위주
-appid 구간에서는 비율이 다를 것으로 예상됨.
-
-**Dota 2(appid 570) 문제 해결 확인**: 이번 실행으로 type=`game`,
-genre=`Action, Strategy, Free To Play`, price=0으로 정상 보강됨 — Job 2에서
-발견됐지만 SteamSpy 벌크에 없어 누락되던 문제가 해소됨.
-
-**남은 물량**: Job 2 백로그 100,061개 중 30개만 처리, 99,969개 남음. 요청당
-Store 1req/sec + game이면 SteamSpy 1req/sec 추가라서 전체를 다 돌리면
-게임 비율에 따라 대략 하루~하루 반 정도 소요 예상 (일일 운영 시에는 그날
-신규 발생분 수십~수백 개만 처리하면 되므로 이 정도로 크지 않음 — 지금의
-99,969개는 최초 1회성 백로그일 뿐).
-
-## MVP 범위 재조정 — 섹션 기반 큐레이션 (전체 카탈로그 대신 5,000개)
-
-Job 3의 대규모 백로그(99,969개, appid 순서로 처리 시 약 3.5일)를 실측해보니
-너무 느렸고, 애초에 웹사이트가 보여줄 섹션(신규 인기 급상승 / 인기 인디 게임 /
-최신 출시 반응 좋은 게임 / 멀티플레이 게임)에 맞춰 게임을 추리는 게 목적에도
-더 맞았다. appid를 무작위로 훑는 대신, **Steam 스토어 자체 검색 API**
-(`store.steampowered.com/search/results/`, 스토어 웹페이지가 쓰는 바로 그
-엔드포인트)로 섹션별 후보를 직접 받아왔다.
-
-이 검색 API는 페이지네이션(count=100) 한 번으로 appid/이름/출시일/가격/
-리뷰 비율·리뷰 수까지 같이 내려주기 때문에, appid별 개별 appdetails 호출이
-필요 없다. `category1=998`(게임) 필터가 이미 걸려 있어 DLC/사운드트랙/툴도
-애초에 안 섞인다.
-
-### 섹션 정의 (`ai/collect/discover_sections.py`)
-
-| 섹션 | 검색 파라미터 | 목표 개수 | 최소 리뷰 수 | 최소 긍정률 |
-|---|---|---|---|---|
-| `trending` (신규 인기 급상승) | `filter=popularnew` | 1200 | - | - |
-| `new_release` (최신 출시, 반응 좋은) | `sort_by=Released_DESC` | 1500 | 5 | 70% |
-| `indie` (인기 인디) | `tags=492, sort_by=Reviews_DESC` | 1500 | 10 | - |
-| `multiplayer` (멀티플레이) | `tags=3859, sort_by=Reviews_DESC` | 1500 | 10 | - |
-
-`trending`은 Steam이 실제로 큐레이션한 "New & Trending" 목록이라 전체 풀이
-356개뿐 (그 이상 없음). 한 게임이 여러 섹션에 걸치면 `games.sections`에
-콤마로 합쳐 기록 (예: `"indie,multiplayer"`).
-
-**실행 결과**: 고유 **4,463개** 후보 확보 (trending 356 / new_release 1,373 /
-indie 1,274 / multiplayer 1,248, 중복 겹침 포함). Dota 2(570)·CS2(730)·
-TF2(440)처럼 이전 Job 1(SteamSpy 벌크)에서 놓쳤던 초대형 게임들도 `trending`
-섹션으로 정상 확보됨 — appid 무작위 크롤보다 목적에 맞고 훨씬 빠름(전체
-수집이 몇 분 내 완료).
-
-이 4,463개에는 아직 genre/tags/price/owners가 없어서 (검색 API가 안 주는
-정보), `ai/collect/enrich_selected.py`로 SteamSpy `appdetails`를 appid당
-1회만 호출해 채운다 — 4,463개 규모라 1req/sec로도 완료까지 약 1~1.5시간.
-`genre`가 이미 채워진 행은 자동으로 제외되므로 중단 후 재실행해도 이어서
-처리된다.
-
-**전체 카탈로그(10만+)로의 확장은 나중으로 미룸.** Job 1~3(SteamSpy 전체
-백필 82,523개 + Job 2 신규 탐지 100,061개)에서 모은 원본 데이터는 삭제하지
-않고 `games` 테이블에 그대로 남겨뒀다 — `sections`가 없는 행들이라 지금의
-5천 개 MVP에는 안 쓰이지만, 나중에 커버리지를 넓힐 때 재활용 가능하다.
-
-### Job 4 — 기존 게임 메타데이터 주기 갱신 (Celery beat, 매일 또는 주 1회 야간)
-- SteamSpy `all` 페이지 전체를 다시 순회해 가격/리뷰/오너수 갱신 (벌크라 저비용)
-- Store `appdetails`로 개별 재조회는 하지 않음 (변경 빈도 낮은 필드는 스킵)
-
-### Job 5 — 인기 게임 우선 갱신 (선택, 추후)
-- ccu/owners 상위 N개는 할인/가격 변동 반영을 위해 더 자주(예: 6시간 주기) 갱신
-
-## 스케줄링 요약
-
-| Job | 주기 | 트리거 |
-|---|---|---|
-| Job 1 (백필) | 1회 | 수동 실행 |
-| Job 2 (신작 탐지) | 매일 | Celery beat cron |
-| Job 3 (신규 보강) | Job 2 직후 | Celery task chain |
-| Job 4 (전체 갱신) | 매일 야간 또는 주 1회 | Celery beat cron |
-| Job 5 (인기작 우선) | 6시간 | Celery beat cron (선택) |
-
-## 남은 전제 조건
-
-1. ~~STEAM_API_KEY 발급~~ — 완료. Job 2가 정상적으로 키를 사용해 호출됨을 확인.
-2. Store `appdetails`의 비공식 rate limit은 커뮤니티 경험치이며 Valve가 공식 문서화하지
-   않음 — 운영 중 429 응답 시 백오프 로직 필요.
-3. CF 모델용 유저-게임 상호작용 데이터(`GetOwnedGames`)는 이 파이프라인과 별도 트랙으로,
-   유저가 Steam 로그인(OpenID)한 시점에 개별 수집하는 방식이 될 것 (본 문서 범위 밖).
-4. **미해결 — genre/tags 보강 범위 결정 필요**: 82,523개 전체를 1req/sec로 개별
-   `appdetails` 조회하면 약 23시간. 선택지:
-   - (a) 전체를 느린 백그라운드 잡으로 며칠에 걸쳐 채움 (완전하지만 느림)
-   - (b) `owners`가 0이거나 극히 낮은 "죽은" 게임은 제외하고 활성 게임만 우선 보강
-     (CF/추천에 실제로 의미 있는 대상만 추리므로 현실적)
-   - (c) 추천 대상 게임 집합을 처음부터 작게(예: 리뷰 수 상위 N만) 잡고 나머지는
-     "발견은 됐지만 미보강" 상태로 남겨둠
-   → 사용자와 상의 후 결정, 아직 미구현.
+- 리뷰는 게임당 최대 20개뿐이라 감성 분석의 표본이 작다.
+- NLP 리뷰 임베딩은 Steam 리뷰 특유의 밈/유머 톤 때문에 "무슨 게임인지"보다
+  "리뷰 쓰는 말투"를 더 강하게 반영하는 경향이 있다 — 하이브리드에서 가중치를
+  낮게 준 이유(ARCHITECTURE.md 참고).
+- 가격은 `cc=us` 고정이라 전부 USD 기준. 한국 원화 등 지역화는 아직 없음.
+- CF는 로그인 유저 수에 전적으로 의존 — 유저가 적으면 추천이 사실상
+  무의미하다 (콜드스타트).

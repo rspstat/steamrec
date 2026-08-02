@@ -3,15 +3,20 @@
 ai/data/games.db는 ai/collect가 채우는 읽기 전용 참고 데이터라 backend가
 쓰기 접근을 하면 안 된다 (ai/backend 분리 원칙, core/db.py는 mode=ro로만
 연다). 로그인한 유저/세션/보유 게임처럼 backend가 직접 써야 하는 데이터는
-여기, 별도 SQLite(app.db)로 관리한다.
+여기, 별도 SQLite(app.db)로 관리한다. Docker 환경에서는 APP_DB_PATH
+환경 변수로 마운트된 볼륨 경로를 가리키게 오버라이드한다.
 """
 
+import os
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parents[2] / "data" / "app.db"
+DB_PATH = Path(
+    os.environ.get("APP_DB_PATH")
+    or (Path(__file__).resolve().parents[2] / "data" / "app.db")
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

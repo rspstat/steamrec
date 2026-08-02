@@ -1,15 +1,19 @@
 """ai/data/games.db (SQLite)에 대한 공용 접근 헬퍼.
 
-Docker/Postgres가 아직 없는 로컬 개발 단계라 SQLite로 시작한다. 컬럼 구조는
-docs/DATA_PIPELINE_DESIGN.md의 `games` 테이블 설계와 동일하게 맞춰서, 나중에
-infra/docker-compose.yml의 Postgres로 옮길 때 스키마를 그대로 재사용한다.
+로컬 개발 단계라 SQLite로 시작한다. Docker 환경에서는 GAMES_DB_PATH 환경
+변수로 마운트된 경로를 가리키게 오버라이드한다 (infra/docker-compose.yml
+참고) — 로컬에서 직접 실행할 땐 환경 변수가 없으면 기존 상대경로를 쓴다.
 """
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parents[1] / "data" / "games.db"
+DB_PATH = Path(
+    os.environ.get("GAMES_DB_PATH")
+    or (Path(__file__).resolve().parents[1] / "data" / "games.db")
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS games (
@@ -39,6 +43,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     language TEXT,
     collected_at TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_reviews_appid ON reviews(appid);
 """
 
 # 기존에 만들어둔 games.db에는 없을 수 있는 컬럼들 (Job 3, 섹션 큐레이션에서 추가됨).
@@ -52,6 +58,13 @@ _MIGRATION_COLUMNS = {
 
 
 def get_connection() -> sqlite3.Connection:
+    """games/reviews 테이블 + 인덱스를 보장한 뒤 연결을 반환한다.
+
+    sections 컬럼에 대한 인덱스는 CREATE TABLE 시점엔 아직 없는 컬럼이라
+    (마이그레이션으로 나중에 추가됨) SCHEMA 안에 넣으면 완전히 새로운 DB에서
+    "no such column: sections"로 깨진다 — 그래서 마이그레이션 이후에 따로
+    만든다.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
@@ -59,6 +72,7 @@ def get_connection() -> sqlite3.Connection:
     for col, col_type in _MIGRATION_COLUMNS.items():
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE games ADD COLUMN {col} {col_type}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_games_sections ON games(sections)")
     return conn
 
 

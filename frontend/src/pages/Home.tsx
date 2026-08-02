@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import AuthBar from "../components/AuthBar";
-import GameCard from "../components/GameCard";
+import SectionRow from "../components/SectionRow";
+import { fetchCurrentUser, type CurrentUser } from "../api/auth";
 import {
+  fetchMyRecommendations,
   fetchSection,
   fetchSimilarGames,
   type Game,
@@ -16,53 +18,69 @@ const SECTIONS: { key: SectionKey; title: string }[] = [
   { key: "multiplayer", title: "멀티플레이 게임" },
 ];
 
+type SectionState = Record<SectionKey, Game[] | null>;
+
 export default function Home() {
-  const [sections, setSections] = useState<Record<SectionKey, Game[]>>(
-    {} as Record<SectionKey, Game[]>
+  const [sections, setSections] = useState<SectionState>(
+    Object.fromEntries(SECTIONS.map((s) => [s.key, null])) as SectionState
   );
+  const [sectionErrors, setSectionErrors] = useState<Partial<Record<SectionKey, boolean>>>({});
+  const [user, setUser] = useState<CurrentUser | null>(null);
+  const [userChecked, setUserChecked] = useState(false);
+  const [recommendations, setRecommendations] = useState<Game[] | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
-  const [similar, setSimilar] = useState<SimilarGame[]>([]);
+  const [similar, setSimilar] = useState<SimilarGame[] | null>(null);
 
   useEffect(() => {
     SECTIONS.forEach(({ key }) => {
-      fetchSection(key).then((games) => {
-        setSections((prev) => ({ ...prev, [key]: games }));
-      });
+      fetchSection(key)
+        .then((games) => setSections((prev) => ({ ...prev, [key]: games })))
+        .catch(() => setSectionErrors((prev) => ({ ...prev, [key]: true })));
     });
+    fetchCurrentUser()
+      .then(setUser)
+      .finally(() => setUserChecked(true));
   }, []);
 
   useEffect(() => {
+    if (!user) {
+      setRecommendations(null);
+      return;
+    }
+    fetchMyRecommendations()
+      .then(setRecommendations)
+      .catch(() => setRecommendations([]));
+  }, [user]);
+
+  useEffect(() => {
     if (selected === null) return;
-    fetchSimilarGames(selected).then(setSimilar);
+    setSimilar(null);
+    fetchSimilarGames(selected)
+      .then(setSimilar)
+      .catch(() => setSimilar([]));
   }, [selected]);
 
   return (
     <div className="home">
       <div className="home-header">
         <h1>steamrec</h1>
-        <AuthBar />
+        {userChecked && <AuthBar user={user} onLoggedOut={() => setUser(null)} />}
       </div>
 
+      {user && <SectionRow title="나를 위한 추천" games={recommendations} onSelect={setSelected} />}
+
       {SECTIONS.map(({ key, title }) => (
-        <section key={key} className="section-row">
-          <h2>{title}</h2>
-          <div className="game-row">
-            {(sections[key] ?? []).map((game) => (
-              <GameCard key={game.appid} game={game} onClick={setSelected} />
-            ))}
-          </div>
-        </section>
+        <SectionRow
+          key={key}
+          title={title}
+          games={sections[key]}
+          error={sectionErrors[key]}
+          onSelect={setSelected}
+        />
       ))}
 
       {selected !== null && (
-        <section className="section-row">
-          <h2>이 게임과 비슷한 게임</h2>
-          <div className="game-row">
-            {similar.map((game) => (
-              <GameCard key={game.appid} game={game} onClick={setSelected} />
-            ))}
-          </div>
-        </section>
+        <SectionRow title="이 게임과 비슷한 게임" games={similar} onSelect={setSelected} />
       )}
     </div>
   );

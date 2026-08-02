@@ -13,7 +13,10 @@ Sentence-BERT(paraphrase-multilingual-MiniLM-L12-v2)를 쓴다.
 결과는 ai/artifacts/nlp_embeddings.npz에 저장 (appids + embeddings 행렬) —
 backend가 무거운 sentence-transformers 의존성 없이 이 배열만 가져다 쓰도록
 하기 위함 (ai/backend 분리 원칙). 장르/태그 기반 유사도(content_based.py)와
-결합하는 건 다음 단계(하이브리드)에서 한다.
+결합하는 건 하이브리드 단계(models/hybrid.py)에서 한다.
+
+기존 아티팩트에 이미 임베딩이 있는 appid는 건너뛴다 — scheduler.py가
+매일 재실행해도 그날 새로 리뷰가 생긴 게임만 인코딩한다 (resumable).
 """
 
 import sqlite3
@@ -37,27 +40,46 @@ def load_reviews(conn: sqlite3.Connection) -> tuple[list[int], list[str]]:
     return [r[0] for r in rows], [r[1] for r in rows]
 
 
+def load_existing() -> dict[int, np.ndarray]:
+    if not ARTIFACT_PATH.exists():
+        return {}
+    data = np.load(ARTIFACT_PATH)
+    return {int(a): v for a, v in zip(data["appids"], data["embeddings"])}
+
+
 def main() -> None:
+    existing = load_existing()
+
     conn = sqlite3.connect(DB_PATH)
     review_appids, texts = load_reviews(conn)
     conn.close()
-    print(f"리뷰 {len(texts)}건 ({len(set(review_appids))}개 게임)")
 
-    model = SentenceTransformer(MODEL_NAME)
-    vectors = model.encode(texts, show_progress_bar=True, batch_size=64)
+    pending_appids = [a for a in review_appids if a not in existing]
+    pending_texts = [t for a, t in zip(review_appids, texts) if a not in existing]
+    print(
+        f"기존 {len(existing)}개 재사용, 신규 리뷰 {len(pending_texts)}건 인코딩 "
+        f"({len(set(pending_appids))}개 게임)"
+    )
 
-    sums: dict[int, np.ndarray] = {}
-    counts: dict[int, int] = {}
-    for appid, vec in zip(review_appids, vectors):
-        sums[appid] = sums.get(appid, np.zeros_like(vec)) + vec
-        counts[appid] = counts.get(appid, 0) + 1
+    if pending_texts:
+        model = SentenceTransformer(MODEL_NAME)
+        vectors = model.encode(pending_texts, show_progress_bar=True, batch_size=64)
 
-    appids = list(sums.keys())
-    embeddings = np.array([sums[a] / counts[a] for a in appids], dtype=np.float32)
+        sums: dict[int, np.ndarray] = {}
+        counts: dict[int, int] = {}
+        for appid, vec in zip(pending_appids, vectors):
+            sums[appid] = sums.get(appid, np.zeros_like(vec)) + vec
+            counts[appid] = counts.get(appid, 0) + 1
+
+        for appid, total in sums.items():
+            existing[appid] = total / counts[appid]
+
+    appids = list(existing.keys())
+    embeddings = np.array([existing[a] for a in appids], dtype=np.float32)
 
     ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
     np.savez(ARTIFACT_PATH, appids=np.array(appids), embeddings=embeddings)
-    print(f"저장 완료: {ARTIFACT_PATH} ({len(appids)}개 게임, {embeddings.shape[1]}차원)")
+    print(f"저장 완료: {ARTIFACT_PATH} (총 {len(appids)}개 게임, {embeddings.shape[1]}차원)")
 
 
 if __name__ == "__main__":

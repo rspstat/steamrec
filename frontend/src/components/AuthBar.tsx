@@ -1,18 +1,11 @@
-import { useEffect, useState } from "react";
-import { fetchCurrentUser, loginUrl, logout, type CurrentUser } from "../api/auth";
+import { loginUrl, logout, type CurrentUser } from "../api/auth";
 
-export default function AuthBar() {
-  const [user, setUser] = useState<CurrentUser | null>(null);
-  const [loaded, setLoaded] = useState(false);
+interface Props {
+  user: CurrentUser | null;
+  onLoggedOut: () => void;
+}
 
-  useEffect(() => {
-    fetchCurrentUser()
-      .then(setUser)
-      .finally(() => setLoaded(true));
-  }, []);
-
-  if (!loaded) return null;
-
+export default function AuthBar({ user, onLoggedOut }: Props) {
   if (!user) {
     return (
       <a className="auth-bar login-button" href={loginUrl()}>
@@ -29,7 +22,7 @@ export default function AuthBar() {
       <button
         onClick={async () => {
           await logout();
-          setUser(null);
+          onLoggedOut();
         }}
       >
         로그아웃

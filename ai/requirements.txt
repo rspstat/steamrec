@@ -9,6 +9,5 @@ sentence-transformers
 faiss-cpu
 pillow
 requests
-steamspypi
-psycopg2-binary
 python-dotenv
+apscheduler

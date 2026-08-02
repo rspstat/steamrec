@@ -5,28 +5,26 @@ services:
       - "8000:8000"
     env_file:
       - ../.env
-    depends_on:
-      - db
-      - redis
+    environment:
+      GAMES_DB_PATH: /data/ai/games.db
+      APP_DB_PATH: /data/backend/app.db
+      # 프론트가 nginx(:3000)로 노출되므로, OpenID 콜백/쿠키가 같은 도메인에
+      # 실리도록 return_to/realm을 프론트 origin 기준으로 맞춘다 (로컬
+      # dev에서 Vite 프록시로 했던 것과 동일한 이유, backend/app/api/auth.py 참고).
+      BACKEND_PUBLIC_BASE_URL: http://localhost:3000/api
+      FRONTEND_BASE_URL: http://localhost:3000
+    volumes:
+      - ../ai/data:/data/ai:ro
+      - backend_data:/data/backend
 
   frontend:
     build: ../frontend
     ports:
       - "3000:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
 
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: steamrec
-    volumes:
-      - db_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-
 volumes:
-  db_data:
+  backend_data:
