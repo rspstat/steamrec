@@ -49,6 +49,45 @@ def test_top_k_larger_than_candidates_returns_all_others():
     assert top_k_indices(np.array([1.0, 0.3, 0.6]), 1, 10) == [0, 2]
 
 
+@pytest.fixture
+def games_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE games (appid INTEGER, genre TEXT, tags TEXT, sections TEXT)")
+    conn.executemany(
+        "INSERT INTO games VALUES (?, ?, ?, ?)",
+        [
+            (1, "Action,RPG", '{"Co-op": 5, "Story": 3}', "catalog"),
+            (2, "Indie", "[]", "catalog"),  # SteamSpy가 빈 리스트를 주는 경우
+            (3, "Action", None, "catalog"),
+            (4, "Action", '{"X": 1}', None),  # 섹션 없음 → 제외
+            (5, "", '{"X": 1}', "catalog"),  # 장르 없음 → 제외
+        ],
+    )
+    yield conn
+    conn.close()
+
+
+def test_load_genre_texts_default_includes_tags(games_conn):
+    from models.hybrid import load_genre_texts
+
+    assert load_genre_texts(games_conn) == {1: "Action RPG Co-op Story", 2: "Indie ", 3: "Action "}
+
+
+def test_load_genre_texts_without_tags_uses_genre_only(games_conn):
+    from models.hybrid import load_genre_texts
+
+    assert load_genre_texts(games_conn, include_tags=False) == {1: "Action RPG", 2: "Indie", 3: "Action"}
+
+
+def test_load_embedding_artifact_reads_given_dir(tmp_path):
+    from models.hybrid import load_embedding_artifact
+
+    np.savez(tmp_path / "x_embeddings.npz", appids=np.array([7, 9]), embeddings=np.eye(2, dtype=np.float32))
+    loaded = load_embedding_artifact("x", tmp_path)
+    assert sorted(loaded) == [7, 9]
+    np.testing.assert_array_equal(loaded[9], [0.0, 1.0])
+
+
 def _saved_rows(conn):
     return conn.execute(
         "SELECT appid, similar_appid, score, rank FROM similar_games ORDER BY appid, rank"

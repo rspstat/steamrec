@@ -41,7 +41,9 @@ WEIGHTS = {
 sys.stdout.reconfigure(encoding="utf-8")
 
 
-def load_genre_texts(conn: sqlite3.Connection) -> dict[int, str]:
+def load_genre_texts(conn: sqlite3.Connection, include_tags: bool = True) -> dict[int, str]:
+    """`include_tags=False`면 장르만 쓴다 — 태그를 정답으로 삼는 평가(evaluation/)에서
+    입력과 정답이 겹치는 순환 평가를 피하기 위한 옵션. 운영(main)은 기본값(True)."""
     rows = conn.execute(
         """
         SELECT appid, genre, tags FROM games
@@ -50,17 +52,20 @@ def load_genre_texts(conn: sqlite3.Connection) -> dict[int, str]:
     ).fetchall()
     result: dict[int, str] = {}
     for appid, genre, tags_json in rows:
-        tags: list[str] = []
-        if tags_json:
-            parsed = json.loads(tags_json)
-            if isinstance(parsed, dict):
-                tags = list(parsed.keys())
-        result[appid] = genre.replace(",", " ") + " " + " ".join(tags)
+        text = genre.replace(",", " ")
+        if include_tags:
+            tags: list[str] = []
+            if tags_json:
+                parsed = json.loads(tags_json)
+                if isinstance(parsed, dict):
+                    tags = list(parsed.keys())
+            text += " " + " ".join(tags)
+        result[appid] = text
     return result
 
 
-def load_embedding_artifact(name: str) -> dict[int, np.ndarray]:
-    path = ARTIFACTS_DIR / f"{name}_embeddings.npz"
+def load_embedding_artifact(name: str, artifacts_dir: Path | None = None) -> dict[int, np.ndarray]:
+    path = (artifacts_dir or ARTIFACTS_DIR) / f"{name}_embeddings.npz"
     data = np.load(path)
     return {int(a): v for a, v in zip(data["appids"], data["embeddings"])}
 
