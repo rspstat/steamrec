@@ -39,6 +39,10 @@ cd ai && pip install -r requirements-dev.txt && pytest
 cd backend && pip install -r requirements-dev.txt && pytest
 ```
 
+push/PR마다 GitHub Actions(`.github/workflows/test.yml`)가 위 두 테스트를 Python 3.11, Ubuntu/Windows에서 돌리도록
+작성돼 있다. **아직 GitHub에서 실제로 실행해 본 적은 없다** — 같은 명령을 로컬 Python 3.11 클린 환경(커밋된 파일만 클론)에서
+돌려 통과를 확인했고 `actionlint`는 통과했지만, Linux 러너는 이 개발 환경에서 검증할 수 없었다.
+
 ## 평가
 
 신호별(장르 / CV 이미지 / NLP 리뷰 / 하이브리드) 유사 게임 추천 품질을 **같은 정답으로 비교**하는

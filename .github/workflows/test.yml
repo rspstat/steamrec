@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.project }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [ai, backend]
+        # 개발은 Windows, 배포(Docker)는 Linux라 둘 다 돌린다 (경로/SQLite URI 차이 확인).
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ${{ matrix.project }}/requirements*.txt
+
+      # ai는 requirements-dev.txt(numpy, scikit-learn, pytest)만 설치한다.
+      # torch/transformers/scikit-surprise가 필요한 모듈(features/, collaborative.py)은 테스트가 import하지 않는다.
+      - run: pip install -r requirements-dev.txt
+
+      - run: pytest
