@@ -65,6 +65,30 @@ def load_embedding_artifact(name: str) -> dict[int, np.ndarray]:
     return {int(a): v for a, v in zip(data["appids"], data["embeddings"])}
 
 
+def combine_similarities(
+    genre_sim: np.ndarray,
+    cv_sim: np.ndarray,
+    nlp_sim: np.ndarray,
+    weights: dict[str, float] = WEIGHTS,
+) -> np.ndarray:
+    return (
+        weights["genre"] * genre_sim + weights["cv"] * cv_sim + weights["nlp"] * nlp_sim
+    )
+
+
+def top_k_indices(scores_row: np.ndarray, i: int, k: int = TOP_K) -> list[int]:
+    """`scores_row`에서 자기 자신(i)을 뺀 점수 내림차순 상위 k개의 인덱스.
+
+    동점이면 원래 인덱스 순서를 유지한다 (sorted의 안정 정렬).
+    """
+    ranked = sorted(
+        ((j, scores_row[j]) for j in range(len(scores_row)) if j != i),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )[:k]
+    return [j for j, _ in ranked]
+
+
 def save_similar_games(conn: sqlite3.Connection, appids: list[int], combined: np.ndarray) -> None:
     conn.execute("DROP TABLE IF EXISTS similar_games")
     conn.execute(
@@ -81,16 +105,11 @@ def save_similar_games(conn: sqlite3.Connection, appids: list[int], combined: np
     n = len(appids)
     for i in range(n):
         scores = combined[i]
-        ranked = sorted(
-            ((j, scores[j]) for j in range(n) if j != i),
-            key=lambda pair: pair[1],
-            reverse=True,
-        )[:TOP_K]
         conn.executemany(
             "INSERT INTO similar_games (appid, similar_appid, score, rank) VALUES (?, ?, ?, ?)",
             [
-                (appids[i], appids[j], float(score), rank)
-                for rank, (j, score) in enumerate(ranked, start=1)
+                (appids[i], appids[j], float(scores[j]), rank)
+                for rank, j in enumerate(top_k_indices(scores, i), start=1)
             ],
         )
     conn.commit()
@@ -113,9 +132,7 @@ def main() -> None:
     nlp_sim = cosine_similarity(nlp_matrix)
     cv_sim = cosine_similarity(cv_matrix)
 
-    combined = (
-        WEIGHTS["genre"] * genre_sim + WEIGHTS["cv"] * cv_sim + WEIGHTS["nlp"] * nlp_sim
-    )
+    combined = combine_similarities(genre_sim, cv_sim, nlp_sim)
 
     save_similar_games(conn, appids, combined)
     conn.close()
