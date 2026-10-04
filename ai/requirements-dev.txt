@@ -1,0 +1,5 @@
+# ai/tests 실행에 필요한 최소 의존성 (torch/transformers/scikit-surprise 불필요).
+# 전체 의존성은 requirements.txt — 테스트는 순수 함수와 합성 데이터만 쓴다.
+numpy
+scikit-learn
+pytest
